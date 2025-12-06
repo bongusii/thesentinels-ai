@@ -1,71 +1,130 @@
 from flask import Flask, request, jsonify
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.pipeline import make_pipeline
 import re
 
 app = Flask(__name__)
 
-# --- LOGIC AI (VĂN BẢN) ---
+# ==========================================
+# 1. DỮ LIỆU HUẤN LUYỆN (DATASET)
+# ==========================================
+# Đây là "vốn hiểu biết" của AI. Bạn càng thêm nhiều câu, AI càng khôn.
+# Cấu trúc: (Nội dung mẫu, Nhãn phân loại)
 
-def is_repetitive(text):
-    """Kiểm tra spam ký tự lặp (vd: aaaaa, abcabcabc)"""
-    if not text or len(text) < 5:
-        return False
-        
-    # 1. Ký tự giống hệt nhau quá nhiều (aaaaaaaa)
-    char = text[0]
-    if text.count(char) / len(text) > 0.8:
-        return True
-        
-    # 2. Chuỗi lặp lại (abcabcabc) - Set unique char ít
-    if len(set(text)) < 4 and len(text) > 10:
-        return True
-        
-    return False
+training_data = [
+    # --- NHÃN: TAI_NAN ---
+    ("Có tai nạn giao thông nghiêm trọng ở ngã tư", "Tai nạn giao thông"),
+    ("Hai xe máy va chạm mạnh, người bị thương", "Tai nạn giao thông"),
+    ("Xe tải lật chắn ngang đường, kẹt xe", "Tai nạn giao thông"),
+    ("Tông xe liên hoàn, cần cứu thương gấp", "Tai nạn giao thông"),
+    ("Người đi bộ bị xe tông trúng", "Tai nạn giao thông"),
+    ("Va quẹt xe nhẹ, đang cãi nhau to", "Tai nạn giao thông"),
 
-def analyze_text_logic(title, description):
-    """Phân tích mức độ tin cậy của báo cáo"""
-    title = title.lower() if title else ""
-    desc = description.lower() if description else ""
-    
-    # 1. Kiểm tra độ dài
-    if len(desc) < 15:
-        return {"suggestion": "Nghi ngờ Spam (Mô tả quá ngắn)", "confidence": 0.80, "source": "python-nlp"}
-    
-    # 2. Kiểm tra lặp lại (Spam)
-    if is_repetitive(desc) or is_repetitive(title):
-        return {"suggestion": "Nghi ngờ Spam (Nội dung vô nghĩa)", "confidence": 0.90, "source": "python-nlp"}
+    # --- NHÃN: CUOP_GIAT ---
+    ("Bị giật điện thoại khi đang nghe máy", "Cướp giật"),
+    ("Có kẻ móc túi ở chợ, cẩn thận", "Cướp giật"),
+    ("Cướp giật dây chuyền rồi bỏ chạy xe máy", "Cướp giật"),
+    ("Mất xe máy, trộm bẻ khóa vào nhà", "Cướp giật"),
+    ("Thấy đối tượng khả nghi rình mò bẻ khóa", "Cướp giật"),
+    ("Bị trấn lột tiền trong hẻm vắng", "Cướp giật"),
 
-    # 3. Kiểm tra từ khóa Test/Spam
-    spam_keywords = ['test', 'thử', 'abc', '123', 'demo', 'alo']
-    if any(w in title for w in spam_keywords) or any(w in desc for w in spam_keywords):
-        return {"suggestion": "Báo cáo thử nghiệm/Spam", "confidence": 0.85, "source": "python-nlp"}
+    # --- NHÃN: DUA_XE ---
+    ("Đám thanh niên tụ tập nẹt pô ầm ĩ", "Tụ tập đua xe"),
+    ("Đua xe trái phép gây rối trật tự", "Tụ tập đua xe"),
+    ("Lạng lách đánh võng, bốc đầu xe", "Tụ tập đua xe"),
+    ("Nhóm quái xế tụ tập chuẩn bị đua", "Tụ tập đua xe"),
 
-    # 4. Kiểm tra từ khóa nguy hiểm (Tăng độ tin cậy)
-    # Nếu có các từ này thì khả năng là báo cáo thật
-    danger_keywords = ['tai nạn', 'cướp', 'cháy', 'đua xe', 'đánh nhau', 'ngập', 'kẹt xe', 'hố ga']
-    if any(w in title for w in danger_keywords) or any(w in desc for w in danger_keywords):
-        return {"suggestion": "Báo cáo hợp lệ (Có từ khóa nguy hiểm)", "confidence": 0.95, "source": "python-nlp"}
+    # --- NHÃN: HOA_HOAN (CHÁY) ---
+    ("Cháy nhà dân, khói bốc lên nghi ngút", "Hỏa hoạn"),
+    ("Có mùi khét lẹt, nghi chập điện cháy", "Hỏa hoạn"),
+    ("Lửa bùng lên dữ dội tại kho hàng", "Hỏa hoạn"),
+    ("Cần cứu hỏa gấp, cháy lớn quá", "Hỏa hoạn"),
 
-    # Mặc định
-    return {"suggestion": "Báo cáo cần xem xét", "confidence": 0.50, "source": "python-nlp"}
+    # --- NHÃN: NGAP_LUT / HA_TANG ---
+    ("Đường ngập nước sâu không đi được", "Hư hỏng hạ tầng"),
+    ("Hố ga mất nắp rất nguy hiểm", "Hư hỏng hạ tầng"),
+    ("Cây xanh gãy đổ chắn ngang đường", "Hư hỏng hạ tầng"),
+    ("Dây điện bị đứt sà xuống đất", "Hư hỏng hạ tầng"),
+
+    # --- NHÃN: SPAM (RÁC) ---
+    ("Alo alo 123 test", "Spam"),
+    ("Thử nghiệm tính năng", "Spam"),
+    ("Test báo cáo abc xyz", "Spam"),
+    ("Bán sim số đẹp giá rẻ", "Spam"),
+    ("Tuyển dụng việc làm lương cao", "Spam"),
+    ("Vay tiền nhanh không thế chấp", "Spam"),
+    ("dfhjsdfhksdf sdjkfhsdkjf", "Spam"), # Ký tự loạn
+    ("aaaaaaaaaaaaaaaaa", "Spam"),
+]
+
+# Tách dữ liệu ra 2 mảng để huấn luyện
+train_texts = [item[0] for item in training_data]
+train_labels = [item[1] for item in training_data]
+
+# ==========================================
+# 2. HUẤN LUYỆN MODEL (TRAINING)
+# ==========================================
+print("Dang huan luyen AI... Vui long cho...")
+
+# Tạo một Pipeline đơn giản:
+# 1. CountVectorizer: Biến đổi chữ thành số (đếm từ)
+# 2. MultinomialNB: Thuật toán Naive Bayes (Cực nhanh và tốt cho văn bản)
+model = make_pipeline(CountVectorizer(), MultinomialNB())
+
+# Bắt đầu học
+model.fit(train_texts, train_labels)
+
+print("AI da hoc xong! San sang phuc vu.")
 
 
-# --- API ENDPOINT ---
+# ==========================================
+# 3. API XỬ LÝ
+# ==========================================
 
 @app.route('/analyze', methods=['POST'])
 def analyze():
-    # Nhận JSON thay vì Form Data
     data = request.json
-    
     if not data:
-        return jsonify({"error": "No JSON data received"}), 400
+        return jsonify({"error": "No data"}), 400
 
+    # Lấy dữ liệu
     title = data.get('title', '')
-    description = data.get('text', '') # Laravel gửi key là 'text'
+    desc = data.get('text', '')
     
-    result = analyze_text_logic(title, description)
+    # Gộp tiêu đề và mô tả để AI có nhiều dữ liệu phân tích hơn
+    full_text = f"{title} {desc}"
+
+    # --- BƯỚC 1: Kiểm tra quy tắc cứng (Hard Rules) trước ---
+    # Nếu chuỗi quá ngắn hoặc lặp ký tự -> Phán Spam luôn, không cần AI đoán
+    if len(desc) < 10 and len(title) < 10:
+         return jsonify({
+            "suggestion": "Nghi ngờ Spam (Quá ngắn)",
+            "confidence": 0.9,
+            "source": "rule-based"
+        })
     
-    return jsonify(result)
+    # --- BƯỚC 2: Dùng AI dự đoán (Machine Learning) ---
+    # Dự đoán nhãn
+    prediction = model.predict([full_text])[0]
+    
+    # Lấy độ tin cậy (Probability) của dự đoán đó
+    # model.predict_proba trả về mảng xác suất cho từng nhãn
+    probs = model.predict_proba([full_text])[0]
+    confidence = max(probs) # Lấy xác suất cao nhất
+
+    # Làm đẹp kết quả trả về
+    suggestion_text = ""
+    if prediction == "Spam":
+        suggestion_text = "Nghi ngờ Spam (Nội dung rác)"
+    else:
+        suggestion_text = f"Phân loại: {prediction}"
+
+    return jsonify({
+        "suggestion": suggestion_text,
+        "confidence": float(round(confidence, 2)), # Làm tròn 2 số lẻ
+        "source": "ai-machine-learning"
+    })
 
 if __name__ == '__main__':
-
     app.run(debug=True)
